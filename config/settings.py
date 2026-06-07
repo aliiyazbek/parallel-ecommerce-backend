@@ -65,6 +65,11 @@ DATABASES = {
 
 AUTH_USER_MODEL = "users.User"
 
+# Redis connection used by the distributed lock (Req 7) and, when present, as a
+# cache backend (Req 6). If Redis is not reachable the lock degrades to an
+# in-process fallback (see core/distributed_lock.py) so demos still run.
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
 ]
@@ -127,6 +132,9 @@ LOGGING = {
     "loggers": {
         "aop":           {"handlers": ["console"], "level": "INFO", "propagate": False},
         "audit":         {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "perf":          {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "locks":         {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "cache":         {"handlers": ["console"], "level": "INFO", "propagate": False},
         "notifications": {"handlers": ["console"], "level": "INFO", "propagate": False},
         "orders":        {"handlers": ["console"], "level": "INFO", "propagate": False},
     },

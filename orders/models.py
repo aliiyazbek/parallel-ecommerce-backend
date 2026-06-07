@@ -68,6 +68,26 @@ class OrderItem(models.Model):
         return self.price * self.quantity
 
 
+class Wallet(models.Model):
+    """A prepaid balance per user, used by the Transaction-Integrity demo.
+
+    The ACID demo (Requirement #8) needs a composite operation that can fail
+    *after* one side-effect has already been applied — the classic "money was
+    taken but no order was created" inconsistency. A wallet balance gives us a
+    second mutable resource (besides product stock) so a partial failure is
+    observable and we can prove it is rolled back atomically.
+    """
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="wallet"
+    )
+    balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Wallet({self.user}: {self.balance})"
+
+
 class DailySalesReport(models.Model):
 
     date = models.DateField(db_index=True)
