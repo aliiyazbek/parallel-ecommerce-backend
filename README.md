@@ -18,6 +18,18 @@ slow work off the request path.
    blocked while they run.
 4. Batch processing: a management command aggregates daily sales in fixed-size
    chunks, each committed in its own atomic transaction.
+5. Load distribution: the same app runs as several **real instances** (separate
+   processes on different ports) behind an HTTP load balancer
+   (round-robin / random / least-connections); traffic is genuinely spread
+   across the instances, removing the single-instance bottleneck.
+6. Distributed caching: hot products are served from a Redis cache (cache-aside,
+   with an in-process fallback), cutting direct database queries by ~98% and
+   invalidated on write to stay consistent across nodes.
+7. Concurrency control with a **distributed lock**: a Redis `SET NX PX` lock
+   (with a safe Lua release and an in-process fallback) serializes shared-
+   resource updates across processes — not just within one.
+8. Transaction integrity (ACID): the composite purchase (charge + stock +
+   order) is all-or-nothing via `transaction.atomic()`, even under concurrency.
 9. Stress / stability testing: a management command fires 100+ concurrent
    checkouts at the real API and verifies the system serves them all with **no
    crash and no data loss** (no overselling, no lost writes).
@@ -25,7 +37,21 @@ slow work off the request path.
     catalogue-listing response time, pinpoints the N+1 query bottleneck, and
     reports a before/after comparison of the `select_related` fix.
 
-Cross-cutting logging and timing are handled by an AOP-style decorator layer.
+Cross-cutting logging and timing are handled by an AOP-style decorator layer
+(`core/aop.py`), including a `@measure` performance aspect.
+
+See `docs/REQ_5_7_8_DESIGN.md` and `docs/REQ_6_DESIGN.md` for the design, AOP
+usage, and before/after results of requirements 5, 6, 7 and 8. Run the demos:
+
+```bash
+# Req 5 — REAL load distribution across instances (two terminals):
+python scripts/start_instances.py --ports 8001 8002 8003   # terminal 1: start the instances
+python manage.py demo_load_distribution_real               # terminal 2: drive load through the balancer
+
+python manage.py demo_distributed_cache        # Req 6  (start Redis for a real distributed cache)
+python manage.py demo_distributed_lock         # Req 7  (start Redis for the real lock)
+python manage.py demo_transaction_integrity    # Req 8
+```
 
 > **Note on the database:** the dev database is SQLite, tuned for concurrent
 > writes in `config/settings.py` (`transaction_mode="IMMEDIATE"`, WAL journal,
