@@ -18,7 +18,11 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.filter(is_active=True)
+    # Bottleneck fix (Requirement #10): the serializer exposes `category_name`
+    # via `source="category.name"`, so listing N products WITHOUT select_related
+    # fired N extra queries (the classic N+1). `select_related("category")` joins
+    # the category in the same query, collapsing N+1 down to a single query.
+    queryset = Product.objects.filter(is_active=True).select_related("category")
     serializer_class = ProductSerializer
     permission_classes = [IsAdminOrReadOnly]
     lookup_field = "slug"

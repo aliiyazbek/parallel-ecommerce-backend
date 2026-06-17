@@ -18,8 +18,20 @@ slow work off the request path.
    blocked while they run.
 4. Batch processing: a management command aggregates daily sales in fixed-size
    chunks, each committed in its own atomic transaction.
+9. Stress / stability testing: a management command fires 100+ concurrent
+   checkouts at the real API and verifies the system serves them all with **no
+   crash and no data loss** (no overselling, no lost writes).
+10. Benchmarking & bottleneck analysis: a management command measures the
+    catalogue-listing response time, pinpoints the N+1 query bottleneck, and
+    reports a before/after comparison of the `select_related` fix.
 
 Cross-cutting logging and timing are handled by an AOP-style decorator layer.
+
+> **Note on the database:** the dev database is SQLite, tuned for concurrent
+> writes in `config/settings.py` (`transaction_mode="IMMEDIATE"`, WAL journal,
+> 30s busy timeout) so the stress test can sustain 100 simultaneous writers.
+> On PostgreSQL (see `requirements.txt`) the `select_for_update()` row locks
+> work natively and this tuning is unnecessary.
 
 ## Getting started
 
@@ -42,6 +54,21 @@ To process the asynchronous task queue, run the worker in a second terminal:
 
 ```bash
 python manage.py run_worker
+```
+
+## Stress test & benchmark (Requirements #9 and #10)
+
+No running server is needed — both commands drive the API in-process and write
+a timestamped Markdown report to `reports/`.
+
+```bash
+# Requirement #9 — 100 concurrent users, proves no crash / no data loss
+python manage.py stress_test                 # default 100 users
+python manage.py stress_test --users 200     # push it harder
+
+# Requirement #10 — measure latency, expose the N+1 bottleneck, before/after
+python manage.py benchmark                    # 200 products, 30 reps
+python manage.py benchmark --products 1000
 ```
 
 ## Configuration

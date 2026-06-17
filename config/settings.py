@@ -60,6 +60,27 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        # ── Concurrency tuning for SQLite (Requirement #9 — stress stability) ──
+        # SQLite serializes writers with a single file lock. Out of the box that
+        # makes ~100 concurrent checkouts fail with "database is locked". These
+        # options let the backend sustain high write concurrency safely:
+        #   timeout=30          → a busy writer waits up to 30s for the lock
+        #                         instead of erroring immediately.
+        #   transaction_mode    → BEGIN IMMEDIATE: each atomic block grabs the
+        #     ="IMMEDIATE"        write lock at the start, so writers serialize
+        #                         cleanly with NO read→write upgrade deadlock.
+        #                         (This also makes the stock read-check-write
+        #                         deterministically correct on SQLite, where
+        #                         select_for_update is otherwise a no-op.)
+        #   init_command (WAL)  → write-ahead logging lets readers run without
+        #                         blocking the single writer.
+        # On PostgreSQL (see requirements.txt / .env.example) these are
+        # unnecessary because row-level select_for_update locking works natively.
+        "OPTIONS": {
+            "timeout": 30,
+            "transaction_mode": "IMMEDIATE",
+            "init_command": "PRAGMA journal_mode=WAL;",
+        },
     }
 }
 
