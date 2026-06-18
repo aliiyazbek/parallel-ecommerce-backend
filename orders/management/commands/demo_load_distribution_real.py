@@ -71,7 +71,7 @@ def fire(do_request, total: int, concurrency: int, path: str) -> dict:
 
     wall0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as ex:
-        list(ex.map(one, range(total)))
+        results = list(ex.map(one, range(total)))
     wall_ms = (time.perf_counter() - wall0) * 1000
 
     latencies.sort()
@@ -82,6 +82,8 @@ def fire(do_request, total: int, concurrency: int, path: str) -> dict:
         "wall_ms": round(wall_ms),
         "p95_ms": round(p95, 1),
         "by_instance": dict(by_instance),
+        # Ordered list (task index → serving instance) for per-task routing output.
+        "tasks": [r.get("instance") for r in results],
     }
 
 
@@ -89,6 +91,12 @@ def spread(by_instance: dict) -> int:
     if not by_instance:
         return 0
     return max(by_instance.values()) - min(by_instance.values())
+
+
+def port_of(instance: str) -> str:
+    """Extract the port from an instance label ('instance-8001') or a URL."""
+    s = str(instance).rsplit(":", 1)[-1]   # 'http://127.0.0.1:8001' -> '8001'
+    return s.rsplit("-", 1)[-1]            # 'instance-8001' -> '8001'
 
 
 def write_report(before, after, strat_runs, chosen, instances, opts) -> Path:
@@ -142,6 +150,13 @@ def write_report(before, after, strat_runs, chosen, instances, opts) -> Path:
     L.append("|----------|-----------------:|")
     for inst, n in sorted(after["by_instance"].items()):
         L.append(f"| {inst} | {n} |")
+    L.append("")
+    L.append("### Per-task routing (sample — first 15 tasks)")
+    L.append("")
+    L.append("```")
+    for i, inst in enumerate(after.get("tasks", [])[:15], start=1):
+        L.append(f"Task {i} -> Handled by node on port {port_of(inst)}")
+    L.append("```")
     L.append("")
     L.append("## Strategy comparison (same workload)")
     L.append("")
@@ -245,6 +260,14 @@ class Command(BaseCommand):
         print()
         print(f"  RESULT: traffic went from 1 instance handling everything to "
               f"{len(instances)} instances sharing the load (strategy: {chosen}).")
+
+        # Per-task routing, in the exact format the brief illustrates.
+        tasks = after.get("tasks", [])
+        sample = min(12, len(tasks))
+        print()
+        print(f"  Per-task routing (strategy: {chosen}) — first {sample} of {len(tasks)}:")
+        for i, inst in enumerate(tasks[:sample], start=1):
+            print(f"    Task {i} -> Handled by node on port {port_of(inst)}")
 
         if not opts["no_report"]:
             p = write_report(before, after, strat_runs, chosen, instances, opts)

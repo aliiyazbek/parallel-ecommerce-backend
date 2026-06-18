@@ -32,6 +32,7 @@ Run:
     python manage.py stress_test --users 200     # push it harder
 """
 
+import statistics
 import threading
 import time
 from datetime import datetime
@@ -174,6 +175,7 @@ def analyse(records, wall_ms, product, users, initial_stock):
     return {
         "total": len(records),
         "created": successes,
+        "failed": len(records) - successes,
         "shed_503": len(shed_503),
         "rejected_400": len(rejected_400),
         "throttled_429": len(throttled_429),
@@ -187,6 +189,7 @@ def analyse(records, wall_ms, product, users, initial_stock):
         "oversold": oversold,
         "wall_ms": round(wall_ms),
         "throughput_rps": round(throughput, 1),
+        "mean_ms": statistics.fmean(lat) if lat else None,
         "p50_ms": _percentile(lat, 0.50),
         "p95_ms": _percentile(lat, 0.95),
         "p99_ms": _percentile(lat, 0.99),
@@ -212,6 +215,13 @@ def print_report(s: dict) -> None:
     print(f" Wall-clock for the storm   : {s['wall_ms']} ms")
     print(f" Throughput                 : {s['throughput_rps']} req/s")
     print(SUB)
+    print(" REQUIRED METRICS (per the brief)")
+    print(f"   Total Requests        : {s['total']}")
+    print(f"   Success Requests      : {s['created']}")
+    print(f"   Failed Requests       : {s['failed']}")
+    print(f"   Average Response Time : {ms(s['mean_ms'])}")
+    print(f"   System crashed        : {'NO' if s['no_crash'] else 'YES'}")
+    print(SUB)
     print(" RESPONSE BREAKDOWN")
     print(f"   201 Created (served)     : {s['created']}")
     print(f"   503 Load-shed (graceful) : {s['shed_503']}   (capacity bulkhead, Req #2 — not a crash)")
@@ -223,7 +233,7 @@ def print_report(s: dict) -> None:
         print(f"      ! {e}")
     print(SUB)
     print(" SUCCESS LATENCY")
-    print(f"   p50 {ms(s['p50_ms'])}   p95 {ms(s['p95_ms'])}   p99 {ms(s['p99_ms'])}   max {ms(s['max_ms'])}")
+    print(f"   avg {ms(s['mean_ms'])}   p50 {ms(s['p50_ms'])}   p95 {ms(s['p95_ms'])}   p99 {ms(s['p99_ms'])}   max {ms(s['max_ms'])}")
     print(SUB)
     print(" DATA-INTEGRITY VERIFICATION (no data loss)")
     print(f"   Initial stock            : {s['initial_stock']}")
@@ -287,6 +297,16 @@ def write_report(s: dict) -> Path:
         f"| {s['total']} | {s['wall_ms']} | {s['throughput_rps']} | "
         f"{ms(s['p50_ms'])} | {ms(s['p95_ms'])} | {ms(s['p99_ms'])} | {ms(s['max_ms'])} |"
     )
+    lines.append("")
+    lines.append("## Required metrics (per the brief)")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|------:|")
+    lines.append(f"| Total Requests | {s['total']} |")
+    lines.append(f"| Success Requests | {s['created']} |")
+    lines.append(f"| Failed Requests | {s['failed']} |")
+    lines.append(f"| Average Response Time | {ms(s['mean_ms'])} ms |")
+    lines.append(f"| System crashed | {'NO' if s['no_crash'] else 'YES'} |")
     lines.append("")
     lines.append("## Response breakdown")
     lines.append("")
