@@ -30,9 +30,12 @@ slow work off the request path.
    resource updates across processes — not just within one.
 8. Transaction integrity (ACID): the composite purchase (charge + stock +
    order) is all-or-nothing via `transaction.atomic()`, even under concurrency.
-9. Stress / stability testing: a management command fires 100+ concurrent
-   checkouts at the real API and verifies the system serves them all with **no
-   crash and no data loss** (no overselling, no lost writes).
+9. Stress / stability testing: two complementary tools fire load at the
+   checkout path — `manage.py stress_test` (in-process, full DRF stack,
+   `--mode concurrent|sequential|both`) and `scripts/load_test.py` (an
+   **external HTTP** client like JMeter/Locust that hits the live server /
+   instances). Both report Total / Success / Failed requests, Average Response
+   Time, and whether the system crashed, and verify **no data loss**.
 10. Benchmarking & bottleneck analysis: a management command measures the
     catalogue-listing response time, pinpoints the N+1 query bottleneck, and
     reports a before/after comparison of the `select_related` fix.
@@ -49,8 +52,23 @@ python scripts/start_instances.py --ports 8001 8002 8003   # terminal 1: start t
 python manage.py demo_load_distribution_real               # terminal 2: drive load through the balancer
 
 python manage.py demo_distributed_cache        # Req 6  (start Redis for a real distributed cache)
+python scripts/demo_shared_cache.py            # Req 6  one-command PROOF the cache is shared across 3 processes
+                                               #        (MISS on instance 1, HIT on instances 2 & 3 from shared Redis)
 python manage.py demo_distributed_lock         # Req 7  (start Redis for the real lock)
 python manage.py demo_transaction_integrity    # Req 8
+
+# Req 9 — stress / stability testing:
+python manage.py stress_test --mode both       # in-process, full stack, sequential vs concurrent
+python manage.py benchmark                     # Req 10 — bottleneck + before/after
+
+# Req 9 — EXTERNAL HTTP load test (like JMeter/Locust), against the live server:
+python manage.py runserver 127.0.0.1:8000                              # terminal 1
+python scripts/load_test.py --base-url http://127.0.0.1:8000 --mode both   # terminal 2
+# …or against the Req 5 instances, driving the real authenticated checkout:
+python scripts/start_instances.py --ports 8001 8002 8003
+python manage.py load_test_seed --stock 1000
+python scripts/load_test.py --targets http://127.0.0.1:8001 http://127.0.0.1:8002 http://127.0.0.1:8003 \
+    --endpoint checkout --requests 60 --concurrency 20
 ```
 
 > **Note on the database:** the dev database is SQLite, tuned for concurrent

@@ -58,16 +58,27 @@ def get_product_uncached(product_id: int) -> dict | None:
 def get_product_cached(product_id: int, ttl: float = 30.0) -> dict | None:
     # AFTER: cache-aside. Try the distributed cache first; only touch the DB on
     # a miss, then populate the cache so subsequent reads are served from Redis.
+    data, _hit = get_product_cached_with_hit(product_id, ttl)
+    return data
+
+
+def get_product_cached_with_hit(product_id: int, ttl: float = 30.0) -> tuple[dict | None, bool]:
+    """Cache-aside read that also reports whether it was a cache HIT.
+
+    Returns (data, was_hit). `was_hit` is True when the value came straight from
+    the distributed cache (no DB query) — used by the /api/whoami/ demo to show
+    that a product cached by ONE instance is served from cache by the OTHERS.
+    """
     key = _product_key(product_id)
 
     raw = cache.cache_get(key)
     if raw is not None:
-        return json.loads(raw)          # HIT — no database query at all
+        return json.loads(raw), True       # HIT — no database query at all
 
     data = _load_product_from_db(product_id)   # MISS — pay for the DB once
     if data is not None:
         cache.cache_set(key, json.dumps(data), ttl=ttl)
-    return data
+    return data, False
 
 
 def invalidate_product(product_id: int) -> None:

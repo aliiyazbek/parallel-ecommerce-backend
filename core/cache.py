@@ -148,6 +148,7 @@ def active_backend() -> str:
 # collector. The hit/miss counters are bumped here too, so the report layer can
 # read everything from the AOP/stats side without touching business code.
 
+
 @measure("cache.get")
 def cache_get(key: str):
     """Return the cached raw string for `key`, or None on a miss."""

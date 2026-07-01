@@ -18,7 +18,7 @@ from rest_framework.response import Response
 
 from core.instance_info import instance_info
 from products.models import Product
-from products.services import get_product_cached
+from products.services import get_product_cached_with_hit
 
 
 @api_view(["GET"])
@@ -30,9 +30,10 @@ def whoami(request):
     product_id = request.query_params.get("product")
     if product_id:
         try:
-            data = get_product_cached(int(product_id))
+            data, was_hit = get_product_cached_with_hit(int(product_id))
             payload["product"] = data
-            payload["served_from_cache"] = data is not None
+            # True only when served straight from the shared cache (no DB query).
+            payload["served_from_cache"] = was_hit
         except (ValueError, Product.DoesNotExist):
             payload["product"] = None
 

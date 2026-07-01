@@ -37,7 +37,7 @@ class Backend:
 class HttpLoadBalancer:
     STRATEGIES = ("round_robin", "random", "least_connections")
 
-    def __init__(self, base_urls: list[str], strategy: str = "round_robin",
+    def __init__(self, base_urls: list[str], strategy: str = "random",
                  timeout: float = 5.0):
         if strategy not in self.STRATEGIES:
             raise ValueError(f"unknown strategy: {strategy}")
