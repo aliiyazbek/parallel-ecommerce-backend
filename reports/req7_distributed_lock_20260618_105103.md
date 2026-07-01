@@ -1,0 +1,36 @@
+# Requirement 7 — Concurrency Control (Distributed Lock)
+
+**Generated:** 2026-06-18T10:51:03  
+**Workers (simulated servers):** 50  
+**Initial stock:** 10  
+**Lock backend:** `redis`
+
+## Scenario
+N worker threads each stand in for a request arriving at one of several application servers (Requirement 5). They are released together by a `threading.Barrier` and each tries to buy 1 unit. The critical section reads the stock into a local variable, waits, then writes it back — the read-modify-write that an in-process lock cannot protect once requests are spread across servers.
+
+## Results
+
+| Mode | Workers | Initial | Successes | Rejected | Final stock | Oversold | Verdict |
+|------|--------:|--------:|----------:|---------:|------------:|---------:|---------|
+| **UNSAFE** | 50 | 10 | 50 | 0 | 9 | 40 | BUG REPRODUCED |
+| **SAFE** | 50 | 10 | 10 | 40 | 0 | 0 | OK — stock limit respected |
+
+## Before vs After
+
+| Metric | BEFORE (no lock) | AFTER (distributed lock) |
+|--------|-----------------:|-------------------------:|
+| Successful purchases | 50 | 10 |
+| Final stock in DB | 9 | 0 |
+| **Oversold by** | **40** | **0** |
+| Verdict | BUG REPRODUCED | OK — stock limit respected |
+
+**Verdict:** the distributed lock eliminated overselling (40 → 0 units). Stock can never go below zero because only one worker — on any server — is inside the critical section at a time.
+
+- **BEFORE critical-section latency (AOP @measure):** p50 143.65 ms / p95 179.97 ms / max 210.1 ms over 50 calls.
+- **AFTER critical-section latency (AOP @measure):** p50 1348.83 ms / p95 1663.2 ms / max 1712.65 ms over 50 calls.
+
+## Where it lives in the codebase
+- Distributed lock primitive: `core/distributed_lock.py::DistributedLock`
+- Safe service: `orders/services.py::decrement_stock_dlock_safe`
+- Unsafe baseline: `orders/services.py::decrement_stock_dlock_unsafe`
+- AOP timing aspect: `core/aop.py::measure` (op `stock.dlock_*`)

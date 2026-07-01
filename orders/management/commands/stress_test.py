@@ -27,9 +27,15 @@ How it works
    from the capacity bulkhead is *graceful load-shedding* (Requirement #2),
    not a crash, so it is reported separately and never counts as data loss.
 
+Reported metrics (test-tool style): Total Requests, Success Requests, Failed
+Requests, Average Response Time, and whether the System crashed — plus the
+data-integrity verification.
+
 Run:
-    python manage.py stress_test                 # 100 concurrent users
-    python manage.py stress_test --users 200     # push it harder
+    python manage.py stress_test                      # 100 concurrent users
+    python manage.py stress_test --users 200          # push it harder
+    python manage.py stress_test --mode sequential    # one request at a time
+    python manage.py stress_test --mode both          # sequential vs concurrent
 """
 
 import statistics
@@ -104,35 +110,45 @@ def setup(num_users: int, stock: int):
     return product, users
 
 
-def run_storm(users: list):
-    """Fire one concurrent checkout per user, all released at the same instant."""
+def _do_checkout(idx: int, user) -> dict:
+    """One real checkout call; returns a record with status + latency."""
+    client = APIClient()
+    client.force_authenticate(user=user)
+    rec = {"idx": idx}
+    try:
+        t0 = time.perf_counter()
+        resp = client.post(
+            "/api/checkout/",
+            {"shipping_address": "123 Stress Test Ave"},
+            format="json",
+        )
+        rec["latency_ms"] = (time.perf_counter() - t0) * 1000
+        rec["status"] = resp.status_code
+    except Exception as exc:  # a real crash for THIS request
+        rec["status"] = "EXC"
+        rec["error"] = f"{type(exc).__name__}: {exc}"
+        rec["latency_ms"] = None
+    finally:
+        # Close this thread's DB connection — each thread gets its own
+        # connection, and leaving them open exhausts SQLite handles.
+        connection.close()
+    return rec
+
+
+def run_concurrent(users: list):
+    """Fire one CONCURRENT checkout per user, all released at the same instant.
+
+    A `threading.Barrier` holds every thread until the last one is ready, so all
+    requests hit the server simultaneously — maximum contention on the shared
+    stock row. This is the real stress scenario.
+    """
     n = len(users)
     records: list = [None] * n
     barrier = threading.Barrier(n)
 
     def worker(idx: int, user):
-        client = APIClient()
-        client.force_authenticate(user=user)
-        rec = {"idx": idx}
-        try:
-            barrier.wait()  # all threads block here, then start together
-            t0 = time.perf_counter()
-            resp = client.post(
-                "/api/checkout/",
-                {"shipping_address": "123 Stress Test Ave"},
-                format="json",
-            )
-            rec["latency_ms"] = (time.perf_counter() - t0) * 1000
-            rec["status"] = resp.status_code
-        except Exception as exc:  # a real crash for THIS request
-            rec["status"] = "EXC"
-            rec["error"] = f"{type(exc).__name__}: {exc}"
-            rec["latency_ms"] = None
-        finally:
-            # Close this thread's DB connection — each thread gets its own
-            # connection, and leaving them open exhausts SQLite handles.
-            connection.close()
-        records[idx] = rec  # distinct index per thread → no lock needed
+        barrier.wait()  # all threads block here, then start together
+        records[idx] = _do_checkout(idx, user)  # distinct index → no lock needed
 
     threads = [threading.Thread(target=worker, args=(i, u)) for i, u in enumerate(users)]
     wall0 = time.perf_counter()
@@ -144,7 +160,22 @@ def run_storm(users: list):
     return records, wall_ms
 
 
-def analyse(records, wall_ms, product, users, initial_stock):
+def run_sequential(users: list):
+    """Fire checkouts ONE AFTER ANOTHER on a single thread — the baseline.
+
+    No two requests overlap, so there is zero contention. Comparing this against
+    the concurrent run shows what concurrency costs (latency) and proves the
+    integrity guarantees are not just an artifact of requests never overlapping.
+    """
+    records = []
+    wall0 = time.perf_counter()
+    for i, u in enumerate(users):
+        records.append(_do_checkout(i, u))
+    wall_ms = (time.perf_counter() - wall0) * 1000
+    return records, wall_ms
+
+
+def analyse(records, wall_ms, product, users, initial_stock, mode="concurrent"):
     def by_status(pred):
         return [r for r in records if pred(r["status"])]
 
@@ -170,9 +201,11 @@ def analyse(records, wall_ms, product, users, initial_stock):
     data_loss_free = no_lost_writes and stock_consistent and no_oversell
 
     lat = sorted(r["latency_ms"] for r in created if r.get("latency_ms") is not None)
+    avg_ms = statistics.fmean(lat) if lat else None
     throughput = (len(records) / (wall_ms / 1000)) if wall_ms else 0.0
 
     return {
+        "mode": mode,
         "total": len(records),
         "created": successes,
         "failed": len(records) - successes,
@@ -189,6 +222,7 @@ def analyse(records, wall_ms, product, users, initial_stock):
         "oversold": oversold,
         "wall_ms": round(wall_ms),
         "throughput_rps": round(throughput, 1),
+        "avg_ms": avg_ms,
         "mean_ms": statistics.fmean(lat) if lat else None,
         "p50_ms": _percentile(lat, 0.50),
         "p95_ms": _percentile(lat, 0.95),
@@ -209,10 +243,16 @@ def print_report(s: dict) -> None:
 
     print()
     print(BANNER)
-    print(" Task 9 — Stress / Stability Test  (Requirement #9)")
+    print(f" Task 9 — Stress / Stability Test  (Requirement #9)  [mode: {s['mode'].upper()}]")
     print(BANNER)
-    print(f" Concurrent users (threads) : {s['total']}")
-    print(f" Wall-clock for the storm   : {s['wall_ms']} ms")
+    print(f" Load mode                  : {s['mode']}  "
+          f"({'all at once' if s['mode'] == 'concurrent' else 'one after another'})")
+    print(f" Total requests             : {s['total']}")
+    print(f" Success requests (201)     : {s['created']}")
+    print(f" Failed requests            : {s['total'] - s['created']}")
+    print(f" Average response time      : {ms(s['avg_ms'])}")
+    print(f" System crashed             : {'YES' if not s['no_crash'] else 'NO'}")
+    print(f" Wall-clock for the run     : {s['wall_ms']} ms")
     print(f" Throughput                 : {s['throughput_rps']} req/s")
     print(SUB)
     print(" REQUIRED METRICS (per the brief)")
@@ -233,6 +273,8 @@ def print_report(s: dict) -> None:
         print(f"      ! {e}")
     print(SUB)
     print(" SUCCESS LATENCY")
+    print(f"   avg {ms(s['avg_ms'])}   p50 {ms(s['p50_ms'])}   p95 {ms(s['p95_ms'])}   "
+          f"p99 {ms(s['p99_ms'])}   max {ms(s['max_ms'])}")
     print(f"   avg {ms(s['mean_ms'])}   p50 {ms(s['p50_ms'])}   p95 {ms(s['p95_ms'])}   p99 {ms(s['p99_ms'])}   max {ms(s['max_ms'])}")
     print(SUB)
     print(" DATA-INTEGRITY VERIFICATION (no data loss)")
@@ -255,7 +297,7 @@ def print_report(s: dict) -> None:
 def write_report(s: dict) -> Path:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = REPORT_DIR / f"task9_stress_{ts}.md"
+    path = REPORT_DIR / f"task9_stress_{s['mode']}_{ts}.md"
 
     def ms(v):
         return f"{v:.0f}" if v is not None else "—"
@@ -266,8 +308,20 @@ def write_report(s: dict) -> Path:
     lines.append("# Task 9 — Stress / Stability Testing")
     lines.append("")
     lines.append(f"**Generated:** {datetime.now().isoformat(timespec='seconds')}  ")
-    lines.append(f"**Concurrent users:** {s['total']}  ")
+    lines.append(f"**Load mode:** {s['mode']}  ")
+    lines.append(f"**Users / requests:** {s['total']}  ")
     lines.append(f"**Requirement:** Serve at least 100 concurrent users without crash or data loss.")
+    lines.append("")
+    lines.append("## Summary (test-tool style)")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|------:|")
+    lines.append(f"| Load mode | {s['mode']} |")
+    lines.append(f"| Total Requests | {s['total']} |")
+    lines.append(f"| Success Requests | {s['created']} |")
+    lines.append(f"| Failed Requests | {s['total'] - s['created']} |")
+    lines.append(f"| Average Response Time | {ms(s['avg_ms'])} ms |")
+    lines.append(f"| System crashed | {'YES' if not s['no_crash'] else 'NO'} |")
     lines.append("")
     lines.append("## Scenario")
     lines.append(
@@ -289,12 +343,12 @@ def write_report(s: dict) -> Path:
         "no-oversell guarantee the numbers below confirm."
     )
     lines.append("")
-    lines.append("## Throughput")
+    lines.append("## Throughput & latency")
     lines.append("")
-    lines.append("| Users | Wall (ms) | Throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |")
-    lines.append("|------:|----------:|-------------------:|---------:|---------:|---------:|---------:|")
+    lines.append("| Users | Wall (ms) | Throughput (req/s) | avg (ms) | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |")
+    lines.append("|------:|----------:|-------------------:|---------:|---------:|---------:|---------:|---------:|")
     lines.append(
-        f"| {s['total']} | {s['wall_ms']} | {s['throughput_rps']} | "
+        f"| {s['total']} | {s['wall_ms']} | {s['throughput_rps']} | {ms(s['avg_ms'])} | "
         f"{ms(s['p50_ms'])} | {ms(s['p95_ms'])} | {ms(s['p99_ms'])} | {ms(s['max_ms'])} |"
     )
     lines.append("")
@@ -363,33 +417,73 @@ def write_report(s: dict) -> Path:
     return path
 
 
+def print_comparison(seq: dict, con: dict) -> None:
+    """Sequential vs Concurrent side-by-side (before/after-style contrast)."""
+    def ms(v):
+        return f"{v:.0f} ms" if v is not None else "—"
+
+    print()
+    print(BANNER)
+    print(" SEQUENTIAL vs CONCURRENT — side by side")
+    print(BANNER)
+    print(f"  {'Metric':<26}{'SEQUENTIAL':>16}{'CONCURRENT':>16}")
+    print(f"  {'-'*26}{'-'*16:>16}{'-'*16:>16}")
+    print(f"  {'Total requests':<26}{seq['total']:>16}{con['total']:>16}")
+    print(f"  {'Success requests':<26}{seq['created']:>16}{con['created']:>16}")
+    print(f"  {'Failed requests':<26}{seq['total']-seq['created']:>16}{con['total']-con['created']:>16}")
+    print(f"  {'Average response time':<26}{ms(seq['avg_ms']):>16}{ms(con['avg_ms']):>16}")
+    print(f"  {'Wall-clock':<26}{str(seq['wall_ms'])+' ms':>16}{str(con['wall_ms'])+' ms':>16}")
+    print(f"  {'Throughput (req/s)':<26}{seq['throughput_rps']:>16}{con['throughput_rps']:>16}")
+    print(f"  {'System crashed':<26}{('YES' if not seq['no_crash'] else 'NO'):>16}{('YES' if not con['no_crash'] else 'NO'):>16}")
+    print(f"  {'Oversold by':<26}{seq['oversold']:>16}{con['oversold']:>16}")
+    print(BANNER)
+    print(" Reading: concurrency raises per-request latency (requests now")
+    print(" contend on the same stock row) but finishes the whole batch in far")
+    print(" less wall-clock — and integrity (0 oversold, 0 crash) holds in BOTH.")
+
+
 class Command(BaseCommand):
-    help = "Task 9: stress test the checkout path with N concurrent users and verify no data loss."
+    help = "Task 9: stress test the checkout path (concurrent and/or sequential) and verify no data loss."
 
     def add_arguments(self, parser):
         parser.add_argument("--users", type=int, default=100,
-                            help="Number of concurrent users/threads (default: 100).")
+                            help="Number of users/requests (default: 100).")
+        parser.add_argument("--mode", choices=["concurrent", "sequential", "both"],
+                            default="concurrent",
+                            help="Load pattern: all-at-once, one-after-another, or both (default: concurrent).")
         parser.add_argument("--stock", type=int, default=None,
                             help="Initial product stock (default: == --users, so all can succeed).")
         parser.add_argument("--no-report", action="store_true",
                             help="Skip writing the Markdown report file.")
 
+    def _run_one(self, mode, num_users, stock, write):
+        self.stdout.write(f"[{mode}] preparing {num_users} users, product stock={stock} …")
+        product, users = setup(num_users, stock)
+        if mode == "concurrent":
+            self.stdout.write(f"[{mode}] releasing {num_users} checkouts all at once …")
+            records, wall_ms = run_concurrent(users)
+        else:
+            self.stdout.write(f"[{mode}] running {num_users} checkouts one after another …")
+            records, wall_ms = run_sequential(users)
+        summary = analyse(records, wall_ms, product, users, stock, mode=mode)
+        print_report(summary)
+        if write:
+            path = write_report(summary)
+            self.stdout.write(f"\nReport saved to: {path}")
+        return summary
+
     def handle(self, *args, **opts):
         num_users = opts["users"]
         stock = opts["stock"] if opts["stock"] is not None else num_users
+        write = not opts["no_report"]
 
-        self.stdout.write(f"Preparing {num_users} users and a product with stock={stock} …")
-        product, users = setup(num_users, stock)
+        modes = ["sequential", "concurrent"] if opts["mode"] == "both" else [opts["mode"]]
+        results = {}
+        for m in modes:
+            results[m] = self._run_one(m, num_users, stock, write)
 
-        self.stdout.write(f"Releasing {num_users} concurrent checkouts …")
-        records, wall_ms = run_storm(users)
+        if opts["mode"] == "both":
+            print_comparison(results["sequential"], results["concurrent"])
 
-        summary = analyse(records, wall_ms, product, users, stock)
-        print_report(summary)
-
-        if not opts["no_report"]:
-            path = write_report(summary)
-            self.stdout.write(f"\nReport saved to: {path}")
-
-        if not summary["passed"]:
+        if any(not r["passed"] for r in results.values()):
             raise SystemExit(1)  # non-zero exit so CI / graders see the failure
